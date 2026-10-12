@@ -400,11 +400,12 @@ async def test_prefix_search_matches_server_tag_names():
     bot.db.search.assert_awaited_once_with(1, name="hel lo")
     assert search.reply.await_args.kwargs["embed"].title == "Guild's tags (1)"
 
-    bot.db.search.reset_mock()
-    listing = prefix_message(".t search")
-    await ui.handle_prefix_message(bot, listing)
-    bot.db.search.assert_awaited_once_with(1, owner_id=2)
-    assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
+    for content in (".t search", '.t search ""'):
+        bot.db.search.reset_mock()
+        listing = prefix_message(content)
+        await ui.handle_prefix_message(bot, listing)
+        bot.db.search.assert_awaited_once_with(1, owner_id=2)
+        assert listing.reply.await_args.kwargs["embed"].title == "User 2's tags (1)"
 
     bot.db.search = AsyncMock(return_value=[])
     missing = prefix_message(".t search nothing")

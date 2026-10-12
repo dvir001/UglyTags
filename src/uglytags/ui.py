@@ -946,7 +946,7 @@ async def prefix_list(bot, message: discord.Message, value: str):
 
 async def prefix_search(bot, message: discord.Message, value: str):
     parsed = prefix_argument(value, consume=True)
-    if parsed is None:
+    if parsed is None or not parsed[0]:
         await prefix_list(bot, message, "")
         return
     tags = await bot.db.search(message.guild.id, name=parsed[0])
