@@ -15,7 +15,7 @@ services:
       MAX_IMPORT_MB: ${MAX_IMPORT_MB:-50}
       MAX_IMPORT_DOWNLOADS: ${MAX_IMPORT_DOWNLOADS:-500}
       MAX_IMPORT_DOWNLOAD_MB: ${MAX_IMPORT_DOWNLOAD_MB:-200}
-      DEAD_LINK_DAYS: ${DEAD_LINK_DAYS:-}
+      DEAD_LINK_DAYS: ${DEAD_LINK_DAYS:-7}
     depends_on:
       uglytags-db:
         condition: service_healthy
