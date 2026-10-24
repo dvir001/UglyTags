@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 CONFIRM_TIMEOUT = 300
 REMOVE_ALL_TIMEOUT = 120
+VOTE_TIMEOUT = 600
+VOTES_TO_REMOVE = 5
 LIST_PAGE_SIZE = 25
 DETAIL_PAGE_SIZE = 10
 MAX_UNDO = 5
@@ -746,6 +748,61 @@ class ForceRemove(OwnedView):
                 await self.message.edit(embed=self.embed, view=None)
             except discord.HTTPException:
                 pass
+
+
+class VoteRemove(discord.ui.View):
+    """A public vote that removes a tag once enough members agree; the requester's
+    own vote counts."""
+
+    def __init__(self, bot, requester_id: int, tag: dict, embed: discord.Embed):
+        super().__init__(timeout=VOTE_TIMEOUT)
+        self.bot, self.tag, self.embed = bot, tag, embed
+        self.voters = {requester_id}
+        self.message = None
+        self.embed.add_field(name=t("vote.votes"), value=self.tally())
+
+    def tally(self) -> str:
+        return f"{len(self.voters)}/{VOTES_TO_REMOVE}"
+
+    @discord.ui.button(label=t("action.vote_remove"), style=discord.ButtonStyle.danger)
+    async def vote(self, interaction, button):
+        if self.is_finished():
+            await interaction.response.defer()
+            return
+        if interaction.guild_id != self.tag["guild_id"] or interaction.user.bot:
+            return
+        if interaction.user.id in self.voters:
+            await interaction.response.send_message(t("vote.already"), ephemeral=True)
+            return
+        self.voters.add(interaction.user.id)
+        self.embed.set_field_at(-1, name=t("vote.votes"), value=self.tally())
+        if len(self.voters) < VOTES_TO_REMOVE:
+            await interaction.response.edit_message(embed=self.embed, view=self)
+            return
+        self.stop()
+        await interaction.response.defer()
+        current = await self.bot.db.get_tag(interaction.guild_id, self.tag["name"])
+        if current is None or current["id"] != self.tag["id"]:
+            await interaction.edit_original_response(
+                content=t("vote.changed"), embed=None, view=None
+            )
+            return
+        await self.bot.db.delete_matching(interaction.guild_id, [current["id"]])
+        self.embed.title = t("result.removed", name=code(current["name"]))
+        self.embed.colour = discord.Colour.green()
+        await interaction.edit_original_response(embed=self.embed, view=None)
+
+    async def on_timeout(self):
+        if self.message:
+            self.embed.colour = discord.Colour.red()
+            self.embed.set_footer(text=t("vote.expired"))
+            try:
+                await self.message.edit(embed=self.embed, view=None)
+            except discord.HTTPException:
+                pass
+
+    async def on_error(self, interaction, error, item):
+        await report_error(interaction, error)
 
 
 class RemoveAll(OwnedView):
@@ -1492,6 +1549,10 @@ async def remove_description(bot, guild_id: int, tag: dict) -> str:
     return description
 
 
+def vote_body(requester_id: int) -> str:
+    return t("vote.body", requester=f"<@{requester_id}>", needed=VOTES_TO_REMOVE)
+
+
 async def prefix_remove(bot, message: discord.Message, value: str):
     if value.lower().startswith("tag "):
         value = value[4:]
@@ -1503,17 +1564,19 @@ async def prefix_remove(bot, message: discord.Message, value: str):
     if tag is None:
         return
     member_permissions = message.author.guild_permissions
-    if tag["owner_id"] != message.author.id and not (
+    allowed = tag["owner_id"] == message.author.id or (
         member_permissions.manage_guild or member_permissions.ban_members
-    ):
-        await prefix_reply(message, t("error.not_owner"))
-        return
+    )
     embed = discord.Embed(
-        title=t("remove.confirm_title"),
+        title=t("remove.confirm_title" if allowed else "vote.title"),
         description=await remove_description(bot, message.guild.id, tag),
         colour=discord.Colour.blurple(),
     )
-    view = ForceRemove(bot, message.author.id, tag, embed)
+    if allowed:
+        view = ForceRemove(bot, message.author.id, tag, embed)
+    else:
+        embed.description += "\n" + vote_body(message.author.id)
+        view = VoteRemove(bot, message.author.id, tag, embed)
     view.message = await prefix_reply(message, "", embed=embed, view=view)
 
 
@@ -2040,13 +2103,11 @@ def register_commands(bot):
         if tag is None:
             return
         member_permissions = permissions(interaction)
-        if tag["owner_id"] != interaction.user.id and not (
+        allowed = tag["owner_id"] == interaction.user.id or (
             member_permissions.manage_guild or member_permissions.ban_members
-        ):
-            await reply(interaction, t("error.not_owner"))
-            return
+        )
         embed = discord.Embed(
-            title=t("remove.confirm_title"),
+            title=t("remove.confirm_title" if allowed else "vote.title"),
             description=await remove_description(bot, interaction.guild_id, tag),
             colour=discord.Colour.blurple(),
         )
@@ -2058,8 +2119,12 @@ def register_commands(bot):
             t("info.uses", uses=f"{tag['uses']:,}"),
         ]
         embed.add_field(name=t("info.title"), value="\n".join(lines))
-        view = ForceRemove(bot, interaction.user.id, tag, embed)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        if allowed:
+            view = ForceRemove(bot, interaction.user.id, tag, embed)
+        else:
+            embed.description += "\n" + vote_body(interaction.user.id)
+            view = VoteRemove(bot, interaction.user.id, tag, embed)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=allowed)
         view.message = await interaction.original_response()
 
     async def scoped_user(interaction, user, permission: str, error_key: str):

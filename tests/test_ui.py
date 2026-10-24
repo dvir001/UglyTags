@@ -1371,10 +1371,16 @@ async def test_remove_permissions_follow_notsobot():
     )
     event = interaction()
     await command(bot, "remove", "tag")(event, "hello")
-    assert "not the owner" in event.response.send_message.await_args.args[0]
+    sent = event.response.send_message.await_args.kwargs
+    assert isinstance(sent["view"], ui.VoteRemove)
+    assert sent["ephemeral"] is False
+    sent["view"].stop()
     event = interaction(ban_members=True)
     await command(bot, "remove", "tag")(event, "hello")
-    assert event.response.send_message.await_args.kwargs["view"] is not None
+    sent = event.response.send_message.await_args.kwargs
+    assert isinstance(sent["view"], ui.ForceRemove)
+    assert sent["ephemeral"] is True
+    sent["view"].stop()
     bot.db.delete.assert_not_awaited()
 
     event = interaction(manage_guild=True)
@@ -1387,6 +1393,67 @@ async def test_remove_permissions_follow_notsobot():
     event = interaction(administrator=True)
     await command(bot, "remove", "all")(event, None, None, None)
     assert bot.db.search.await_args.kwargs["owner_id"] is None
+    await bot.close()
+
+
+@pytest.mark.parametrize("prefix", [False, True])
+async def test_remove_vote_needs_five_distinct_members(prefix):
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=tag(owner_id=3)),
+        delete_matching=AsyncMock(),
+    )
+    if prefix:
+        event = prefix_message(".t delete hello")
+        await ui.handle_prefix_message(bot, event)
+        sent = event.reply.await_args.kwargs
+    else:
+        event = interaction()
+        await command(bot, "remove", "tag")(event, "hello")
+        sent = event.response.send_message.await_args.kwargs
+    view = sent["view"]
+    assert isinstance(view, ui.VoteRemove)
+    assert "Vote to Remove" in sent["embed"].title
+    assert sent["embed"].fields[-1].value == "1/5"
+
+    again = button_event(2)
+    await view.vote.callback(again)
+    assert "already voted" in again.response.send_message.await_args.args[0]
+    bot_click = button_event(9)
+    bot_click.user.bot = True
+    await view.vote.callback(bot_click)
+    for user_id in (4, 5, 6):
+        await view.vote.callback(button_event(user_id))
+    assert sent["embed"].fields[-1].value == "4/5"
+    bot.db.delete_matching.assert_not_awaited()
+
+    last = button_event(7)
+    await view.vote.callback(last)
+    await view.vote.callback(button_event(8))
+    bot.db.delete_matching.assert_awaited_once_with(1, [10])
+    assert "Removed tag" in last.edit_original_response.await_args.kwargs["embed"].title
+    await bot.close()
+
+
+@pytest.mark.parametrize("action", ["timeout", "replaced"])
+async def test_remove_vote_does_not_delete_without_valid_votes(action):
+    bot = stats_bot(
+        get_tag=AsyncMock(return_value=tag(owner_id=3)),
+        delete_matching=AsyncMock(),
+    )
+    event = prefix_message(".t delete hello")
+    await ui.handle_prefix_message(bot, event)
+    view = event.reply.await_args.kwargs["view"]
+    if action == "timeout":
+        await view.on_timeout()
+        assert view.message.edit.await_args.kwargs["view"] is None
+    else:
+        bot.db.get_tag.return_value = tag(id=11, owner_id=3)
+        for user_id in (4, 5, 6, 7):
+            click = button_event(user_id)
+            await view.vote.callback(click)
+        assert "during the vote" in click.edit_original_response.await_args.kwargs["content"]
+    bot.db.delete_matching.assert_not_awaited()
+    view.stop()
     await bot.close()
 
 

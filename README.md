@@ -129,7 +129,8 @@ delete button is left out.
   exact name. From `.t search` the tag's output replaces the list; from
   `/tag list` it is posted publicly and the private list stays. NotSoBot has none of
   these.
-- `/tag remove tag name`: removes a tag after confirmation, even for its owner.
+- `/tag remove tag name`: removes a tag after confirmation, even for its owner. For
+  someone else's tag without the permissions below, it starts a public removal vote.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,
   with an option to export them first.
 - `/tag undo [amount]`: the slash version of `.undo`, answered privately. It deletes
@@ -192,6 +193,10 @@ These follow NotSoBot, except that server administrators can also overwrite tags
   offered a different name instead.
 - Members with Manage Server or Ban Members can remove anyone's tag after a
   confirmation.
+- Other members who remove someone else's tag start a public vote instead (an
+  UglyTags addition). The tag and its aliases are removed once 5 members, counting the
+  one who started it, press the vote button. The vote expires after 10 minutes and
+  does not survive a bot restart.
 - `/tag remove all` without a user, or for another user, requires Administrator.
   Other members can only remove their own tags.
 - `/tag export` without a user, or for another user, requires Manage Server. Other
