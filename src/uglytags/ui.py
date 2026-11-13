@@ -288,14 +288,16 @@ async def execute(
     preview: bool = False,
     reply_message: discord.Message | None = None,
     cycle=None,
+    steps=(),
 ):
     """Run a tag. A preview is private and counts no use; `cycle` shows a numbered
-    variation in place of this output, and its arrows are only added to public output."""
+    variation in place of this output, and its arrows, after any `steps` buttons, are
+    only added to public output."""
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=preview, thinking=True)
     if not preview:
         await bot.db.use(tag, interaction.guild_id, interaction.user.id)
-    variations = await tag_variations(bot, interaction.guild_id, tag, cycle) if cycle else None
+    controls = await tag_controls(bot, interaction.guild_id, tag, cycle, steps)
     if is_group(tag):
         tag = await bot.db.random_member(target_id(tag))
         if tag is None:
@@ -303,7 +305,7 @@ async def execute(
                 interaction,
                 "\n\n".join(part for part in (title, t("error.group_empty")) if part),
                 preview,
-                variations,
+                controls,
             )
             return
         if not preview:
@@ -325,10 +327,10 @@ async def execute(
             interaction,
             "\n\n".join(part for part in (title, str(error)) if part),
             preview,
-            variations,
+            controls,
         )
         return
-    await render.send_result(interaction, rt, result, title, preview, reply_message, variations)
+    await render.send_result(interaction, rt, result, title, preview, reply_message, controls)
 
 
 async def execute_message(
@@ -339,16 +341,17 @@ async def execute_message(
     attachment,
     title: str = "",
     cycle=None,
+    steps=(),
 ):
     await bot.db.use(tag, message.guild.id, message.author.id)
-    variations = await tag_variations(bot, message.guild.id, tag, cycle) if cycle else None
+    controls = await tag_controls(bot, message.guild.id, tag, cycle, steps)
     if is_group(tag):
         tag = await bot.db.random_member(target_id(tag))
         if tag is None:
             await render.send_message_error(
                 message,
                 "\n\n".join(part for part in (title, t("error.group_empty")) if part),
-                variations,
+                controls,
             )
             return
         await bot.db.use(tag, message.guild.id, message.author.id)
@@ -365,10 +368,17 @@ async def execute_message(
         result = await tagscript.parse(rt, tag_content(tag), arguments)
     except tagscript.TagError as error:
         await render.send_message_error(
-            message, "\n\n".join(part for part in (title, str(error)) if part), variations
+            message, "\n\n".join(part for part in (title, str(error)) if part), controls
         )
         return
-    await render.send_message_result(message, rt, result, title, variations)
+    await render.send_message_result(message, rt, result, title, controls)
+
+
+async def tag_controls(bot, guild_id: int, tag: dict, cycle, steps) -> render.Controls | None:
+    """The `steps` buttons followed by any variation arrows, or None without either."""
+    variations = await tag_variations(bot, guild_id, tag, cycle) if cycle else None
+    parts = [*steps, *([variations] if variations else [])]
+    return render.Controls(parts) if parts else None
 
 
 async def tag_variations(bot, guild_id: int, tag: dict, run) -> render.Variations | None:
@@ -1238,14 +1248,20 @@ def picked_title(tag: dict, typed: str) -> str:
     return "" if tag["name"].lower() == typed.lower() else t("show.title", name=code(tag["name"]))
 
 
-def prefix_runner(bot, message: discord.Message, typed: str, arguments: str, attachment):
+def prefix_runner(bot, message: discord.Message, typed: str, arguments: str, attachment, back=None):
     """Show a tag picked from a suggestion, search reply, or variation arrow in place
-    of that reply."""
+    of that reply. A `back` step is kept on the tag's output."""
 
     async def run(interaction: discord.Interaction, name: str):
         tag = await bot.db.get_tag(message.guild.id, name)
         if tag is None:
-            if interaction.response.is_done():
+            if back:
+                # Show the results again, now without the missing tag.
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                await back.run(interaction)
+                await interaction.followup.send(t("error.unknown_tag"), ephemeral=True)
+            elif interaction.response.is_done():
                 await interaction.followup.send(t("error.unknown_tag"), ephemeral=True)
             else:
                 await interaction.response.edit_message(
@@ -1256,7 +1272,14 @@ def prefix_runner(bot, message: discord.Message, typed: str, arguments: str, att
             await interaction.response.defer()
         # Replaces the reply, as if the command had named this tag.
         await execute_message(
-            bot, message, tag, arguments, attachment, picked_title(tag, typed), run
+            bot,
+            message,
+            tag,
+            arguments,
+            attachment,
+            picked_title(tag, typed),
+            run,
+            steps=[back] if back else (),
         )
 
     return run
@@ -1497,11 +1520,15 @@ async def prefix_search(bot, message: discord.Message, value: str):
     if parsed is None or not parsed[0]:
         await prefix_list(bot, message, "")
         return
+
+    async def back(interaction: discord.Interaction):
+        await prefix_search(bot, message, value)
+
     view = await search_list(
         message.author.id,
         lambda count: t("list.server", guild=message.guild.name, count=f"{count:,}"),
         partial(bot.db.search, message.guild.id, name=parsed[0]),
-        prefix_runner(bot, message, parsed[0], "", None),
+        prefix_runner(bot, message, parsed[0], "", None, render.Step(t("search.back"), back)),
     )
     if view is None:
         await prefix_reply(message, t("error.no_matching_tags"))
@@ -1516,19 +1543,57 @@ async def prefix_send_list(message: discord.Message, view: ListView):
     view.message = sent
 
 
+class RandomTags:
+    """Previous and Re-roll buttons over the tags a random command has shown.
+
+    `get(name)` finds a shown tag again, `roll()` picks a tag, `empty` is the error when
+    it finds none, and `show(interaction, tag, steps)` shows a tag with the buttons; the
+    interaction is None for the command's first tag."""
+
+    def __init__(self, get, roll, empty: str, show):
+        self.get, self.roll, self.empty, self.show = get, roll, empty, show
+
+    async def display(self, interaction, tag: dict, history: tuple[str, ...]):
+        steps = []
+        if len(history) > 1:
+            steps.append(
+                render.Step(
+                    t("random.previous", name=history[-2]), partial(self.previous, history[:-1])
+                )
+            )
+        steps.append(render.Step(t("random.reroll"), partial(self.reroll, history)))
+        await self.show(interaction, tag, steps)
+
+    async def previous(self, history: tuple[str, ...], interaction: discord.Interaction):
+        tag = await self.get(history[-1])
+        if tag is None:
+            await interaction.followup.send(t("error.unknown_tag"), ephemeral=True)
+            return
+        await self.display(interaction, tag, history)
+
+    async def reroll(self, history: tuple[str, ...], interaction: discord.Interaction):
+        tag = await self.roll()
+        if tag is None:
+            await interaction.followup.send(self.empty, ephemeral=True)
+            return
+        await self.display(interaction, tag, (*history, tag["name"]))
+
+
 async def prefix_random(bot, message: discord.Message, arguments: str):
     tag = await bot.db.random(message.guild.id)
     if tag is None:
         await render.send_message_error(message, t("error.no_tags"))
         return
-    await execute_message(
-        bot,
-        message,
-        tag,
-        arguments,
-        message.attachments[0] if message.attachments else None,
-        t("show.title", name=code(tag["name"])),
-    )
+    attachment = message.attachments[0] if message.attachments else None
+
+    async def show(interaction, tag: dict, steps):
+        title = t("show.title", name=code(tag["name"]))
+        await execute_message(bot, message, tag, arguments, attachment, title, steps=steps)
+
+    roll = partial(bot.db.random, message.guild.id)
+    get = partial(bot.db.get_tag, message.guild.id)
+    random = RandomTags(get, roll, t("error.no_tags"), show)
+    await random.display(None, tag, (tag["name"],))
 
 
 async def remove_description(bot, guild_id: int, tag: dict) -> str:
@@ -2007,17 +2072,30 @@ def register_commands(bot):
         attachment: discord.Attachment | None = None,
     ):
         await interaction.response.defer(thinking=True)
-        tag = await bot.db.random(
-            interaction.guild_id, name=name, content=content, owner_id=user and user.id
+        roll = partial(
+            bot.db.random,
+            interaction.guild_id,
+            name=name,
+            content=content,
+            owner_id=user and user.id,
         )
+        empty = t("error.no_matching_tags" if content or name or user else "error.no_tags")
+        tag = await roll()
         if tag is None:
-            await render.send_error(
-                interaction,
-                t("error.no_matching_tags" if content or name or user else "error.no_tags"),
-            )
+            await render.send_error(interaction, empty)
             return
-        title = t("show.title", name=code(tag["name"]))
-        await execute(bot, interaction, tag, arguments or "", attachment, title)
+
+        async def show(picked, tag: dict, steps):
+            if picked is not None:
+                # The same message is now tracked for undo under this interaction.
+                render.REPLIES.forget_reply(picked.message.id)
+            title = t("show.title", name=code(tag["name"]))
+            await execute(
+                bot, picked or interaction, tag, arguments or "", attachment, title, steps=steps
+            )
+
+        random = RandomTags(partial(bot.db.get_tag, interaction.guild_id), roll, empty, show)
+        await random.display(None, tag, (tag["name"],))
 
     async def send_list(interaction, make_title, search, name: str | None, filtered: bool):
         async def run(picked: discord.Interaction, picked_name: str):

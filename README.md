@@ -119,6 +119,12 @@ delete button is left out.
   5 minutes.
 - `/tag random [arguments] [content] [name] [user] [attachment]`: runs a random
   matching tag. Its output starts with "Showing `name`" (NotSoBot says "Showing tag:").
+  The output of this and `.t random` has a **Re-roll** button that replaces it with
+  another random matching tag, with the same arguments, and after a re-roll a button
+  named after the previous tag goes back to it. Like the variation arrows, they are
+  only for the person who ran the command, each use counts, they are removed after 5
+  minutes, and tags whose output has its own components get no buttons. Random output
+  gets no variation arrows. NotSoBot has neither button.
 - `/tag list server [content] [name] [user]` and `/tag list user [user] [content] [name]`:
   list tags. Filters match case-insensitive substrings.
   With a name filter (here or in `.t search`), the results have an **Include similar
@@ -126,9 +132,10 @@ delete button is left out.
   matches, and a search that finds nothing shows the similar names instead. Name
   search results also have a menu of the current page's tags: picking one shows it
   (without arguments), starting with "Showing `name`" unless the search was for that
-  exact name. From `.t search` the tag's output replaces the list; from
-  `/tag list` it is posted publicly and the private list stays. NotSoBot has none of
-  these.
+  exact name. From `.t search` the tag's output replaces the list and has a **Back to
+  results** button (kept through its variation arrows) that runs the search again in
+  its place, from the first page; from `/tag list` it is posted publicly and the
+  private list stays, so it needs no Back button. NotSoBot has none of these.
 - `/tag remove tag name`: removes a tag after confirmation, even for its owner. For
   someone else's tag without the permissions below, it starts a public removal vote.
 - `/tag remove all [content] [name] [user]`: removes matching tags after confirmation,

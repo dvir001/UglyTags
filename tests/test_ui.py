@@ -208,7 +208,9 @@ async def test_prefix_show_suggestion_button_runs_the_tag(monkeypatch):
     await button.callback(click)
     bot.db.get_tag.assert_awaited_with(1, "hello")
     click.response.defer.assert_awaited_once()
-    execute.assert_awaited_once_with(bot, message, row, "some args", None, "Showing `hello`", ANY)
+    execute.assert_awaited_once_with(
+        bot, message, row, "some args", None, "Showing `hello`", ANY, steps=()
+    )
     await bot.close()
 
 
@@ -230,7 +232,7 @@ async def test_prefix_show_suggestion_menu_lists_every_name(monkeypatch):
     assert not await menu.view.interaction_check(other)
     await menu.callback(interaction())
     bot.db.get_tag.assert_awaited_with(1, "help")
-    execute.assert_awaited_once_with(bot, message, row, "", None, "Showing `help`", ANY)
+    execute.assert_awaited_once_with(bot, message, row, "", None, "Showing `help`", ANY, steps=())
     await bot.close()
 
 
@@ -515,7 +517,9 @@ async def test_prefix_info_list_random_and_remove(monkeypatch):
 
     random = prefix_message(".t random some arguments")
     await ui.handle_prefix_message(bot, random)
-    execute.assert_awaited_once_with(bot, random, row, "some arguments", None, "Showing `hello`")
+    execute.assert_awaited_once_with(
+        bot, random, row, "some arguments", None, "Showing `hello`", steps=ANY
+    )
 
     remove = prefix_message(".t remove tag hello")
     await ui.handle_prefix_message(bot, remove)
@@ -631,7 +635,9 @@ async def test_picking_a_search_result_shows_the_tag(monkeypatch):
     await view.picker.callback(click)
     bot.db.get_tag.assert_awaited_with(1, "t27")
     click.response.defer.assert_awaited_once()
-    execute.assert_awaited_once_with(bot, message, rows[27], "", None, "Showing `t27`", ANY)
+    execute.assert_awaited_once_with(
+        bot, message, rows[27], "", None, "Showing `t27`", ANY, steps=ANY
+    )
 
     # A search for the exact name shows the tag without a title.
     execute.reset_mock()
@@ -640,7 +646,7 @@ async def test_picking_a_search_result_shows_the_tag(monkeypatch):
     view = message.reply.await_args.kwargs["view"]
     view.picker._values = ["t27"]
     await view.picker.callback(interaction())
-    execute.assert_awaited_once_with(bot, message, rows[27], "", None, "", ANY)
+    execute.assert_awaited_once_with(bot, message, rows[27], "", None, "", ANY, steps=ANY)
     await bot.close()
 
 
@@ -2314,6 +2320,98 @@ async def test_slash_arrows_edit_the_output_and_keep_one_undo_entry():
     assert click.edit_original_response.await_args.kwargs["content"] == "Showing `cat2`\n\ntwo"
     assert ui.render.REPLIES.get(event.id) is None
     assert ui.render.REPLIES.get(click.id) is not None
+    await bot.close()
+
+
+async def test_random_rerolls_and_steps_back_in_place():
+    bot = variation_bot()
+    cat, cat2 = tag(id=1, name="cat", content="one"), tag(id=2, name="cat2", content="two")
+    bot.db.random = AsyncMock(side_effect=[cat, cat2, None])
+    message = prefix_message(".t random")
+    # Each edit returns the same reply, like editing a real message.
+    message.reply.return_value.edit.return_value = message.reply.return_value
+    await ui.handle_prefix_message(bot, message)
+    sent = message.reply.await_args
+    assert sent.args[0] == "Showing `cat`\n\none"
+    [_, reroll] = sent.kwargs["view"].children
+    assert reroll.label == ui.t("random.reroll")
+
+    await reroll.callback(interaction())
+    edited = message.reply.return_value.edit.await_args.kwargs
+    assert edited["content"] == "Showing `cat2`\n\ntwo"
+    [_, previous, reroll] = edited["view"].children
+    assert previous.label == ui.t("random.previous", name="cat")
+
+    await previous.callback(interaction())
+    edited = message.reply.return_value.edit.await_args.kwargs
+    assert edited["content"] == "Showing `cat`\n\none"
+    [_, reroll] = edited["view"].children
+
+    stranger = interaction(user_id=9)
+    await reroll.callback(stranger)
+    stranger.response.send_message.assert_awaited_once()
+    click = interaction()
+    await reroll.callback(click)
+    click.followup.send.assert_awaited_once_with(ui.t("error.no_tags"), ephemeral=True)
+    message.reply.assert_awaited_once()
+    await bot.close()
+
+
+async def test_slash_random_rerolls_with_the_same_filters_and_one_undo_entry():
+    bot = variation_bot()
+    cat, cat2 = tag(id=1, name="cat", content="one"), tag(id=2, name="cat2", content="two")
+    bot.db.random = AsyncMock(side_effect=[cat, cat2])
+    channel = SimpleNamespace(id=5, get_partial_message=MagicMock())
+    event = slash_event(channel)
+    await command(bot, "random")(event, None, None, "ca", SimpleNamespace(id=3), None)
+    [_, reroll] = event.edit_original_response.await_args.kwargs["view"].children
+
+    click = slash_event(channel)
+    click.message = event.edit_original_response.return_value
+    await reroll.callback(click)
+    assert bot.db.random.await_args_list == [call(1, name="ca", content=None, owner_id=3)] * 2
+    edited = click.edit_original_response.await_args.kwargs
+    assert edited["content"] == "Showing `cat2`\n\ntwo"
+    [_, previous, _] = edited["view"].children
+    assert previous.label == ui.t("random.previous", name="cat")
+    assert ui.render.REPLIES.get(event.id) is None
+    assert ui.render.REPLIES.get(click.id) is not None
+    await bot.close()
+
+
+async def test_a_picked_search_result_can_go_back_to_the_results():
+    bot = variation_bot()
+    bot.db.search = AsyncMock(return_value=[tag(id=1, name="cat"), tag(id=2, name="cat2")])
+    message = prefix_message(".t search ca")
+    # Each edit returns the same reply, like editing a real message.
+    message.reply.return_value.edit.return_value = message.reply.return_value
+    await ui.handle_prefix_message(bot, message)
+    view = message.reply.await_args.kwargs["view"]
+    view.picker._values = ["cat"]
+    await view.picker.callback(interaction())
+    edited = message.reply.return_value.edit.await_args.kwargs
+    assert edited["content"] == "Showing `cat`\n\none"
+    [_, back, arrow] = edited["view"].children
+    assert back.label == ui.t("search.back")
+    assert arrow.label == ui.t("variation.next", name="cat2")
+
+    # The Back button stays when stepping through variations.
+    await arrow.callback(interaction())
+    [_, back, _] = message.reply.return_value.edit.await_args.kwargs["view"].children
+    await back.callback(interaction())
+    edited = message.reply.return_value.edit.await_args.kwargs
+    assert edited["embeds"][0].title == "Guild's tags (2)"
+    assert isinstance(edited["view"], ui.SearchView)
+    message.reply.assert_awaited_once()
+
+    # Picking a tag deleted since the search shows the results again.
+    bot.db.search.return_value = [tag(id=2, name="cat2")]
+    edited["view"].picker._values = ["gone"]
+    click = interaction()
+    await edited["view"].picker.callback(click)
+    edited = message.reply.return_value.edit.await_args.kwargs
+    assert edited["embeds"][0].title == "Guild's tags (1)"
+    click.followup.send.assert_awaited_once_with(ui.t("error.unknown_tag"), ephemeral=True)
     await bot.close()
 
 
