@@ -74,9 +74,9 @@ For multi-step tasks, state a brief plan:
 	`tagscript.py`, math in `mathexpr.py`, persistence in `db.py`/`schema.sql`, files in
 	`media.py`, and import/export in `transfer.py`.
 - Port TagScript behavior from `notsobot.ts` `src/utils/tags/index.ts`. Note intentional
-	differences in the README. Never evaluate tag content with Python `eval` or similar.
+	differences in the README or `COMMANDS.md`. Never evaluate tag content with Python `eval` or similar.
 - Scope every tag operation by guild ID. Recheck ownership and Discord permissions at
-	runtime; follow NotSoBot's permission rules documented in the README.
+	runtime; follow NotSoBot's permission rules documented in `COMMANDS.md`.
 - Outbound HTTP is limited to Discord CDN hosts without redirects. Do not add
 	general URL fetching.
 - Store tag files in PostgreSQL, enforce `MAX_MEDIA_MB` and 10 files per tag, and never
