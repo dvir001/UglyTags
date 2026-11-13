@@ -270,8 +270,10 @@ async def test_pages_attach_referenced_files():
 async def test_variation_arrows_show_neighbours_and_only_answer_the_owner():
     run = AsyncMock()
     variations = render.Variations(["cat", "cat2", "cat3"], 1, run)
-    prepared = render.prepare(runtime(), await result_of("meow"), variations=variations)
-    assert isinstance(prepared.view, render.VariationView)
+    prepared = render.prepare(
+        runtime(), await result_of("meow"), controls=render.Controls([variations])
+    )
+    assert isinstance(prepared.view, render.ControlView)
     labels = [item.label for item in prepared.view.children[1:]]
     assert labels == [
         render.t("variation.previous", name="cat"),
@@ -296,7 +298,7 @@ async def test_variation_arrows_show_neighbours_and_only_answer_the_owner():
 
     first = render.Variations(["cat", "cat2"], 0, run)
     result = await result_of('{pagejson:[{"content":"a"},{"content":"b"}]}')
-    prepared = render.prepare(runtime(), result, variations=first)
+    prepared = render.prepare(runtime(), result, controls=render.Controls([first]))
     assert isinstance(prepared.view, render.Paginator)
     row = prepared.view.to_components()[1]["components"]
     assert row[0]["custom_id"] == TRASH_ID
